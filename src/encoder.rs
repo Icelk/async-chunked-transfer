@@ -14,29 +14,48 @@
 // limitations under the License.
 
 use std::io::Result as IoResult;
-use std::io::Write;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use tokio::io::AsyncWrite;
+
+macro_rules! ok_ready {
+    ($poll: expr) => {
+        match $poll {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Ready(Ok(v)) => v,
+        }
+    };
+}
 
 /// Splits the incoming data into HTTP chunks.
+///
+/// **NOTE**: Since this is async, we cannot finish the writer in the [`Drop`] implementation.
+/// Therefore, it's crucial for you to call [`Encoder::finish`] before dropping this.
 ///
 /// # Example
 ///
 /// ```
 /// use async_chunked_transfer::Encoder;
-/// use std::io::Write;
+/// use tokio::io::AsyncWriteExt;
 ///
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn test () {
 /// let mut decoded = "hello world";
 /// let mut encoded: Vec<u8> = vec![];
 ///
 /// {
 ///     let mut encoder = Encoder::with_chunks_size(&mut encoded, 5);
-///     encoder.write_all(decoded.as_bytes());
+///     encoder.write_all(decoded.as_bytes()).await;
+///     encoder.finish().await;
 /// }
 ///
 /// assert_eq!(encoded, b"5\r\nhello\r\n5\r\n worl\r\n1\r\nd\r\n0\r\n\r\n");
+/// # }
 /// ```
 pub struct Encoder<W>
 where
-    W: Write,
+    W: AsyncWrite + Unpin,
 {
     // where to send the result
     output: W,
@@ -52,6 +71,10 @@ where
     // Flushes the internal buffer after each write. This might be useful
     // if data should be sent immediately to downstream consumers
     flush_after_write: bool,
+
+    // The offset we are writing from in the buffer.
+    // Will be `Some` if we are currently writing a chunk.
+    offset: Option<usize>,
 }
 
 const MAX_CHUNK_SIZE: usize = std::u32::MAX as usize;
@@ -61,7 +84,7 @@ const MAX_HEADER_SIZE: usize = 6;
 
 impl<W> Encoder<W>
 where
-    W: Write,
+    W: AsyncWrite + Unpin,
 {
     pub fn new(output: W) -> Encoder<W> {
         Encoder::with_chunks_size(output, 8192)
@@ -74,6 +97,7 @@ where
             chunks_size,
             buffer: vec![0; MAX_HEADER_SIZE],
             flush_after_write: false,
+            offset: None,
         };
         encoder.reset_buffer();
         encoder
@@ -85,6 +109,7 @@ where
             chunks_size: 8192,
             buffer: vec![0; MAX_HEADER_SIZE],
             flush_after_write: true,
+            offset: None,
         };
         encoder.reset_buffer();
         encoder
@@ -94,6 +119,8 @@ where
         // Reset buffer, still leaving space for the chunk size. That space
         // will be populated once we know the size of the chunk.
         self.buffer.truncate(MAX_HEADER_SIZE);
+
+        self.offset = None;
     }
 
     fn is_buffer_empty(&self) -> bool {
@@ -104,105 +131,151 @@ where
         self.buffer.len() - MAX_HEADER_SIZE
     }
 
-    fn send(&mut self) -> IoResult<()> {
-        // Never send an empty buffer, because that would be interpreted
-        // as the end of the stream, which we indicate explicitly on drop.
-        if self.is_buffer_empty() {
-            return Ok(());
+    fn send(&mut self, cx: &mut Context) -> Poll<IoResult<()>> {
+        // First possibility; we have data in our buffer to write
+        if let Some(mut offset) = self.offset {
+            loop {
+                let wrote =
+                    ok_ready!(Pin::new(&mut self.output).poll_write(cx, &self.buffer[offset..]));
+                offset += wrote;
+
+                self.offset = Some(offset);
+
+                if offset >= self.buffer.len() {
+                    self.reset_buffer();
+                    break;
+                }
+            }
+            // self.send(cx)
+            Poll::Ready(Ok(()))
+            // Second possibility; we create a new chunk.
+        } else {
+            // Never send an empty buffer, because that would be interpreted
+            // as the end of the stream, which we indicate explicitly on drop.
+            if self.is_buffer_empty() {
+                return Poll::Ready(Ok(()));
+            }
+            // Prepend the length and \r\n to the buffer.
+            let prelude = format!("{:x}\r\n", self.buffer_len());
+            let prelude = prelude.as_bytes();
+
+            // This should never happen because MAX_CHUNK_SIZE of u32::MAX
+            // can always be encoded in 4 hex bytes.
+            assert!(
+                prelude.len() <= MAX_HEADER_SIZE,
+                "invariant failed: prelude longer than MAX_HEADER_SIZE"
+            );
+
+            // Copy the prelude into the buffer. For small chunks, this won't necessarily
+            // take up all the space that was reserved for the prelude.
+            let offset = MAX_HEADER_SIZE - prelude.len();
+            self.buffer[offset..MAX_HEADER_SIZE].clone_from_slice(&prelude);
+
+            // Append the chunk-finishing \r\n to the buffer.
+            self.buffer.extend_from_slice(b"\r\n");
+
+            self.offset = Some(offset);
+
+            self.send(cx)
         }
-        // Prepend the length and \r\n to the buffer.
-        let prelude = format!("{:x}\r\n", self.buffer_len());
-        let prelude = prelude.as_bytes();
-
-        // This should never happen because MAX_CHUNK_SIZE of u32::MAX
-        // can always be encoded in 4 hex bytes.
-        assert!(
-            prelude.len() <= MAX_HEADER_SIZE,
-            "invariant failed: prelude longer than MAX_HEADER_SIZE"
-        );
-
-        // Copy the prelude into the buffer. For small chunks, this won't necessarily
-        // take up all the space that was reserved for the prelude.
-        let offset = MAX_HEADER_SIZE - prelude.len();
-        self.buffer[offset..MAX_HEADER_SIZE].clone_from_slice(&prelude);
-
-        // Append the chunk-finishing \r\n to the buffer.
-        self.buffer.write_all(b"\r\n")?;
-
-        self.output.write_all(&self.buffer[offset..])?;
-        self.reset_buffer();
-
-        Ok(())
     }
-}
+    fn poll_finish(&mut self, cx: &mut Context) -> Poll<IoResult<()>> {
+        ok_ready!(self.send(cx));
+        Pin::new(&mut self.output)
+            .poll_write(cx, b"0\r\n\r\n" as &[u8])
+            .map(|r| r.map(|_| ()))
+    }
+    pub async fn finish (mut self) -> IoResult<()> {
+        crate::poll_fn(|cx| self.poll_finish(cx)).await
+    }
 
-impl<W> Write for Encoder<W>
-where
-    W: Write,
-{
-    fn write(&mut self, data: &[u8]) -> IoResult<usize> {
+    fn priv_poll_write(mut self: Pin<&mut Self>, cx: &mut Context, data: &[u8], data_written: usize) -> Poll<IoResult<usize>> {
         let remaining_buffer_space = self.chunks_size - self.buffer_len();
         let bytes_to_buffer = std::cmp::min(remaining_buffer_space, data.len());
         self.buffer.extend_from_slice(&data[0..bytes_to_buffer]);
         let more_to_write: bool = bytes_to_buffer < data.len();
         if self.flush_after_write || more_to_write {
-            self.send()?;
+            ok_ready!(self.send(cx));
         }
 
         // If we didn't write the whole thing, keep working on it.
         if more_to_write {
-            self.write_all(&data[bytes_to_buffer..])?;
+            return self.priv_poll_write(cx, &data[bytes_to_buffer..], bytes_to_buffer + data_written);
         }
-        Ok(data.len())
+        Poll::Ready(Ok(bytes_to_buffer + data_written))
+    }
+}
+
+impl<W> AsyncWrite for Encoder<W>
+where
+    W: AsyncWrite + Unpin,
+{
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<IoResult<usize>> {
+        self.priv_poll_write(cx, data, 0)
     }
 
-    fn flush(&mut self) -> IoResult<()> {
-        self.send()
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
+        self.send(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<IoResult<()>> {
+        ok_ready!(self.poll_finish(cx));
+        Pin::new(&mut self.output).poll_shutdown(cx)
     }
 }
 
 impl<W> Drop for Encoder<W>
 where
-    W: Write,
+    W: AsyncWrite + Unpin,
 {
     fn drop(&mut self) {
-        self.flush().ok();
-        write!(self.output, "0\r\n\r\n").ok();
+        if !self.is_buffer_empty() {
+            eprintln!(
+                "Dropping non-empty Chunked-Transfer encoder. This will cause invalid output."
+            )
+        }
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::Encoder;
-    use std::io;
+    use std::io::Cursor;
     use std::io::Write;
     use std::str::from_utf8;
+    use tokio::io::copy;
 
-    #[test]
-    fn test() {
-        let mut source = io::Cursor::new("hello world".to_string().into_bytes());
+    #[tokio::test]
+    async fn test() {
+        let mut source = Cursor::new("hello world".to_string().into_bytes());
         let mut dest: Vec<u8> = vec![];
 
         {
             let mut encoder = Encoder::with_chunks_size(dest.by_ref(), 5);
-            io::copy(&mut source, &mut encoder).unwrap();
-            assert!(!encoder.is_buffer_empty());
+            copy(&mut source, &mut encoder).await.unwrap();
+            // Tokio's copy function calls flush, so this isn't guaranteed.
+            // assert!(!encoder.is_buffer_empty());
+            encoder.finish().await.unwrap();
         }
 
         let output = from_utf8(&dest).unwrap();
 
         assert_eq!(output, "5\r\nhello\r\n5\r\n worl\r\n1\r\nd\r\n0\r\n\r\n");
     }
-    #[test]
-    fn flush_after_write() {
-        let mut source = io::Cursor::new("hello world".to_string().into_bytes());
+    #[tokio::test]
+    async fn flush_after_write() {
+        let mut source = Cursor::new("hello world".to_string().into_bytes());
         let mut dest: Vec<u8> = vec![];
 
         {
             let mut encoder = Encoder::with_flush_after_write(dest.by_ref());
-            io::copy(&mut source, &mut encoder).unwrap();
+            copy(&mut source, &mut encoder).await.unwrap();
             // The internal buffer has been flushed.
             assert!(encoder.is_buffer_empty());
+            encoder.finish().await.unwrap();
         }
 
         let output = from_utf8(&dest).unwrap();

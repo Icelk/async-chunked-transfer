@@ -1,5 +1,8 @@
 # async-chunked-transfer
 
+**Note:** The only difference between this and `chunked_transfer` is
+that you MUST call `Encoder::finish` before dropping the encoder.
+
 [Documentation](https://docs.rs/async_chunked_transfer/)
 
 Encoder and decoder for HTTP chunked transfer coding. For more information about chunked transfer encoding:
@@ -37,6 +40,7 @@ let mut encoded: Vec<u8> = vec![];
 {
     let mut encoder = Encoder::with_chunks_size(&mut encoded, 5);
     encoder.write_all(decoded.as_bytes()).await;
+    encoder.finish().await;
 }
 
 assert_eq!(encoded, b"5\r\nhello\r\n5\r\n worl\r\n1\r\nd\r\n0\r\n\r\n");
