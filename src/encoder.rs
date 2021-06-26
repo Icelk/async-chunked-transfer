@@ -21,7 +21,7 @@ use std::io::Write;
 /// # Example
 ///
 /// ```
-/// use chunked_transfer::Encoder;
+/// use async_chunked_transfer::Encoder;
 /// use std::io::Write;
 ///
 /// let mut decoded = "hello world";
