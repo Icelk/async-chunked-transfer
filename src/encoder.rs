@@ -185,6 +185,10 @@ where
             .poll_write(cx, b"0\r\n\r\n" as &[u8])
             .map(|r| r.map(|_| ()))
     }
+    /// Finishes the chunked-transfer with a 0-size chunk.
+    ///
+    /// This should only be called when ALL data is written to this.
+    /// To push any data in the buffer, use [`tokio::io::AsyncWriteExt::flush`].
     pub async fn finish (mut self) -> IoResult<()> {
         crate::poll_fn(|cx| self.poll_finish(cx)).await
     }

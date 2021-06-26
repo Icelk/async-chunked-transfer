@@ -1,5 +1,7 @@
 # async-chunked-transfer
 
+> Async fork of [chunked-transfer](https://github.com/frewsxcv/rust-chunked-transfer).
+
 **Note:** The only difference between this and `chunked_transfer` is
 that you MUST call `Encoder::finish` before dropping the encoder.
 

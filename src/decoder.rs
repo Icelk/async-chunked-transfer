@@ -76,7 +76,7 @@ where
         self.remaining_chunks_size
     }
 
-    /// Unwraps the Decoder into its inner `Read` source.
+    /// Unwraps the Decoder into its inner [`AsyncRead`] source.
     pub fn into_inner(self) -> R {
         self.source
     }
