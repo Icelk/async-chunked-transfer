@@ -40,7 +40,7 @@ macro_rules! ok_ready {
 /// use async_chunked_transfer::Decoder;
 /// use tokio::io::AsyncReadExt;
 ///
-/// # #[tokio::test]
+/// # #[tokio::main(flavor = "current_thread")]
 /// # async fn test() {
 /// let encoded = b"3\r\nhel\r\nb\r\nlo world!!!\r\n0\r\n\r\n";
 /// let mut decoded = String::new();
@@ -232,30 +232,6 @@ mod test {
     use std::io;
     use tokio::io::AsyncReadExt;
 
-    fn poll_fn<T, F>(f: F) -> PollFn<F>
-    where
-        F: FnMut(&mut Context<'_>) -> Poll<T>,
-    {
-        PollFn { f }
-    }
-
-    pub struct PollFn<F> {
-        f: F,
-    }
-
-    impl<F> Unpin for PollFn<F> {}
-
-    impl<T, F> std::future::Future for PollFn<F>
-    where
-        F: FnMut(&mut Context<'_>) -> Poll<T>,
-    {
-        type Output = T;
-
-        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
-            (&mut self.f)(cx)
-        }
-    }
-
     /// This unit test is taken from from Hyper
     /// https://github.com/hyperium/hyper
     /// Copyright (c) 2014 Sean McArthur
@@ -265,7 +241,7 @@ mod test {
     async fn test_read_chunk_size() {
         async fn read(s: &str, expected: usize) {
             let mut decoded = Decoder::new(s.as_bytes());
-            poll_fn(|cx| {
+            crate::poll_fn(|cx| {
                 let actual = match decoded.read_chunk_size(cx) {
                     Poll::Pending => panic!(),
                     Poll::Ready(r) => r.unwrap(),
@@ -278,7 +254,7 @@ mod test {
 
         async fn read_err(s: &str) {
             let mut decoded = Decoder::new(s.as_bytes());
-            poll_fn(|cx| {
+            crate::poll_fn(|cx| {
                 let err_kind = match decoded.read_chunk_size(cx) {
                     Poll::Pending => return Poll::Pending,
                     Poll::Ready(r) => r.unwrap_err().kind(),
