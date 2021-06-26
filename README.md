@@ -1,9 +1,6 @@
-# rust-chunked-transfer
+# async-chunked-transfer
 
-[![Build Status](https://travis-ci.org/frewsxcv/rust-chunked-transfer.svg?branch=master)](https://travis-ci.org/frewsxcv/rust-chunked-transfer)
-[![chunked\_transfer on Crates.io](https://meritbadge.herokuapp.com/chunked_transfer)](https://crates.io/crates/chunked\_transfer)
-
-[Documentation](https://docs.rs/chunked_transfer/)
+[Documentation](https://docs.rs/async_chunked_transfer/)
 
 Encoder and decoder for HTTP chunked transfer coding. For more information about chunked transfer encoding:
 
@@ -16,14 +13,14 @@ Encoder and decoder for HTTP chunked transfer coding. For more information about
 ### Decoding
 
 ```rust
-use chunked_transfer::Decoder;
-use std::io::Read;
+use async_chunked_transfer::Decoder;
+use tokio::io::AsyncReadExt;
 
 let encoded = b"3\r\nhel\r\nb\r\nlo world!!!\r\n0\r\n\r\n";
 let mut decoded = String::new();
 
 let mut decoder = Decoder::new(encoded as &[u8]);
-decoder.read_to_string(&mut decoded);
+decoder.read_to_string(&mut decoded).await;
 
 assert_eq!(decoded, "hello world!!!");
 ```
@@ -32,14 +29,14 @@ assert_eq!(decoded, "hello world!!!");
 
 ```rust
 use chunked_transfer::Encoder;
-use std::io::Write;
+use tokio::io::AsyncWriteExt;
 
 let mut decoded = "hello world";
 let mut encoded: Vec<u8> = vec![];
 
 {
     let mut encoder = Encoder::with_chunks_size(&mut encoded, 5);
-    encoder.write_all(decoded.as_bytes());
+    encoder.write_all(decoded.as_bytes()).await;
 }
 
 assert_eq!(encoded, b"5\r\nhello\r\n5\r\n worl\r\n1\r\nd\r\n0\r\n\r\n");
@@ -47,5 +44,6 @@ assert_eq!(encoded, b"5\r\nhello\r\n5\r\n worl\r\n1\r\nd\r\n0\r\n\r\n");
 
 ## Authors
 
+* [Icelk](https://github.com/icelk)
 * [tomaka](https://github.com/tomaka)
 * [frewsxcv](https://github.com/frewsxcv)

@@ -1,14 +1,18 @@
 [package]
-name = "chunked_transfer"
+name = "async_chunked_transfer"
 version = "1.4.0"
-authors = ["Corey Farwell <coreyf@rwell.org>"]
+authors = ["Corey Farwell <coreyf@rwell.org>", "Icelk <main@icelk.dev>"]
 license = "Apache-2.0"
-repository = "https://github.com/frewsxcv/rust-chunked-transfer"
-description = "Encoder and decoder for HTTP chunked transfer coding (RFC 7230 § 4.1)"
+repository = "https://github.com/icelk/async-chunked-transfer"
+description = "Async encoder and decoder for HTTP chunked transfer coding (RFC 7230 § 4.1)"
 edition = "2018"
+
+[dependencies]
+tokio = { version = "^1", features = ["io-util"] }
 
 [dev-dependencies]
 criterion = "0.3"
+tokio = { version = "^1", features = ["rt", "macros"] }
 
 [[bench]]
 name = "encode"
