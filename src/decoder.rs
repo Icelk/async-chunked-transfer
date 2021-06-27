@@ -354,4 +354,45 @@ mod test {
         let mut string = String::new();
         assert!(decoded.read_to_string(&mut string).await.is_err());
     }
+    /// Test to check if the decoder finishes when it receives `0\r\n\r\n` and doesn't wait for
+    /// next data.
+    ///
+    /// This test doesn't pass in the current decoder implementation in Kvarn.
+    #[tokio::test]
+    async fn additional_content(){
+        use tokio::io::*;
+        struct Reader {
+            written: usize,
+            data: Vec<u8>,
+        }
+        impl AsyncRead for Reader {
+            fn poll_read(mut self: Pin<&mut Self>, _: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+                if self.written == self.data.len() {
+                    return Poll::Pending;
+                }
+
+                let len = std::cmp::min(buf.remaining(), self.data.len() - self.written);
+
+                let data = &self.data[self.written..self.written + len];
+                buf.put_slice(data);
+                self.written += len;
+
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        let data = "3\r\nhel\r\nb\r\nlo world!!!\r\n0\r\n\r\n";
+
+        let reader = Reader {
+            written: 0,
+            data: data.as_bytes().to_owned(),
+        };
+
+        let mut decoder = Decoder::new(reader);
+
+        let mut string = String::new();
+        decoder.read_to_string(&mut string).await.unwrap();
+
+        assert_eq!(string, "hello world!!!");
+    }
 }
